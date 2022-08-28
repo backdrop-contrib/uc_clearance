@@ -1,0 +1,17 @@
+<?php
+/**
+ * @file
+ * Install, update and uninstall functions for the uc_clearance module.
+ *
+ */
+
+/**
+ * Convert uc_clearance variables to config.
+ */
+function uc_clearance_update_1000() {
+  $config = config('uc_clearance.settings');
+  $config->set('uc_clearance_tid', update_variable_get('uc_clearance_tid', ''));
+  $config->save();
+
+  update_variable_del('uc_clearance_tid');
+}

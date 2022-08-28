@@ -1,0 +1,11 @@
+name = Ubercart Clearance
+description = Adds special handling for products marked "Clearance".
+dependencies[] = rules
+dependencies[] = ubercart
+dependencies[] = uc_stock
+package = Ubercart - extra
+backdrop = 1.x
+type = module
+
+configure = admin/store/settings/clearance
+

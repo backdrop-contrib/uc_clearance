@@ -1,7 +1,7 @@
 <?php
 /**
  * @file
- * Rules default configurations for uc_clearance.module.
+ * Rules default configurations for the Ubercart Clearance module.
  */
 
 /**

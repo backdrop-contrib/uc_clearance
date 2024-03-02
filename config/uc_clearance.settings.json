@@ -1,4 +1,13 @@
 {
     "_config_name": "uc_clearance.settings",
-    "uc_clearance_tid": ""
+    "tid": "",
+    "method": "tid",
+    "clearance_text": {
+        "value": "<strong>CLEARANCE</strong>—Orders will be accepted until product is gone. Please don't order more than the quantity remaining, which is: QTY_AVAILABLE.",
+        "format": "filtered_html"
+    },
+    "sold_out_text": {
+        "value": "<strong>Sold out and discontinued.</strong>",
+        "format": "filtered_html"
+    }
 }

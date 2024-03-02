@@ -28,6 +28,6 @@ function uc_clearance_rules_action_info() {
  */
 function uc_clearance_action_check_clearance_stock($order, $settings) {
   if (is_array($order->products)) {
-    array_walk($order->products, '_uc_clearance_check_clearance');
+    array_walk($order->products, '_uc_clearance_check_to_unpublish');
   }
 }

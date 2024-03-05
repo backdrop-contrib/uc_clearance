@@ -9,3 +9,8 @@ type = module
 
 configure = admin/store/settings/clearance
 
+
+; Added by Backdrop CMS packaging script on 2022-08-28
+project = uc_clearance
+version = 1.x-1.0.0
+timestamp = 1661712221

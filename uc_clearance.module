@@ -1,7 +1,7 @@
 <?php
 /**
  * @file
- * Main file for the Clearance module.
+ * Main file for the Ubercart Clearance module.
  */
 
 /**
@@ -16,62 +16,174 @@ function uc_clearance_menu() {
     'page arguments' => array('uc_clearance_settings_form'),
     'file' => 'uc_clearance.admin.inc',
     'access arguments' => array('administer catalog'),
-    'type' => MENU_NORMAL_ITEM,
   );
 
   return $items;
 }
 
 /**
- * Implements hook_form_BASE_FORM_ID_alter() for uc_product_add_to_cart_form().
+ * Implements hook_form_BASE_FORM_ID_alter() for
+ * uc_product_add_to_cart_form_NID().
  *
  * For clearance products, on the product page display a message about remaining
  * stock and if we're out of stock, remove the "Add to cart" button.
  *
  */
 function uc_clearance_form_uc_product_add_to_cart_form_alter(&$form, &$form_state, $form_id) {
-  $node = node_load($form['nid']['#value']);
-  if (_uc_clearance_is_clearance($node)) {
-    $stock_info = _uc_clearance_stock_info($node);
-    if (isset($stock_info)) {
+  $node = $form['node']['#value'];
+  if (!_uc_clearance_is_clearance($node)) {
+    // Not a clearance product.
+    return;
+  }
+  // Get stock info, reduced by any products that are already in the cart.
+  $stock_info = _uc_clearance_stock_info($node, TRUE);
+  if ($stock_info['total_level'] <= 0) {
+    // Product is sold out, but still visible.
+    $sold_out_text = config_get('uc_clearance.settings', 'sold_out_text');
+    if (!empty($sold_out_text['value'])) {
       $form['clearance'] = array(
-        '#markup' => '',
+        '#type' => 'help',
+        '#markup' => check_markup($sold_out_text['value'], $sold_out_text['format']),
         '#attributes' => array('class' => 'clearance'),
-        '#prefix' => '<p>',
-        '#suffix' => '</p>',
       );
-      if ($stock_info['total'] <= 0) {
-        // sold out
-        $form['clearance']['#markup'] = '<b>' . t('Sold out and discontinued') . '</b>';
-        unset($form['actions']['submit']);
-      }
-      else {
-        // some stock remaining
-        $form['clearance']['#markup'] = '<b>' . t('CLEARANCE') . '</b> &mdash; ' .
-          t("Orders will be accepted until product is gone. Please don't order more than the quantity remaining, which is: !qty", array('!qty' => $stock_info['avail']));
-      }
     }
-    else {
-      // $stock_info was empty, so no stock active, so return with no mods
-      return;
-    }
+    unset($form['actions']['submit']);
   }
   else {
-    // product wasn't clearance, so no changes
-    return;
+    // some stock remaining. Add clearance note.
+    $clearance_text = config_get('uc_clearance.settings', 'clearance_text');
+    if (!empty($clearance_text['value'])) {
+      $clearance_text = str_replace('QTY_AVAILABLE', $stock_info['avail'], $clearance_text);
+      $form['clearance'] = array(
+        '#type' => 'help',
+        '#markup' => check_markup($clearance_text['value'], $clearance_text['format']),
+        '#attributes' => array('class' => 'clearance'),
+      );
+    }
+    // If there are attributes (options), remove the ones whose stock is 0.
+    foreach ($form['attributes'] as $aid => &$element) {
+      if (is_string($aid) && $aid[0] == '#') {
+        continue;
+      }
+      if ($element['#type'] != 'select') {
+        continue;
+      }
+      $options = $element['#options'];
+      // map SKUs to option keys
+      $combos = db_query('
+        SELECT model as sku, combination
+        FROM {uc_product_adjustments}
+        WHERE nid = :nid
+        ', array(':nid' => $form['nid']['#value']))
+        ->fetchAllKeyed();
+      foreach ($combos as $sku => &$combo) {
+        $combo = unserialize($combo)[$aid];
+      }
+      // Unset any options whose stock has dropped to zero.
+      foreach ($stock_info['options'] as $sku => $info) {
+        if ($info['level'] == 0) {
+          $oid = $combos[$sku];
+          unset($options[$oid]);
+        }
+      }
+      $element['#options'] = $options;
+    }
   }
 }
 
 /**
- * Implements hook_form_BASE_FORM_ID_alter() for uc_catalog_buy_it_now_form().
+ * Implements hook_form_FORM_ID_alter() for uc_cart_view_form().
  *
- * For clearance products that are out of stock, remove the "Add to cart" button.
+ * @see uc_clearance_form_uc_cart_view_form_validate().
+ */
+function uc_clearance_form_uc_cart_view_form_alter(&$form, &$form_state, $form_id) {
+
+  // If we're disabling the quantity item for the special case of 1 item in the
+  // cart and 1 item in stock.
+  if (config_get('uc_clearance.settings', 'disable_unit_qty')) {
+    foreach ($form['items'] as $key => $item) {
+      if (!isset($item['nid'])) {
+        continue;
+      }
+      $node = $item['#entity'];
+      if (_uc_clearance_is_clearance($node)) {
+        $qty_requested = $form['items']['#parameters'][1][$key]['qty']['#default_value'];
+        $stock_info = _uc_clearance_stock_info($node);
+        if (isset($stock_info['options'])) {
+          $sku = $node->model;
+          if (isset($stock_info['options'][$sku])) {
+            $qty_available = $stock_info['options'][$sku]['level'];
+          }
+          else {
+            $qty_available = 0;
+          }
+        }
+        else {
+          $qty_available = $stock_info['level'];
+        }
+      }
+      if ($qty_requested == 1 && $qty_available == 1) {
+        // Disable quantity, since the only modification allowed would be to
+        // remove the item.
+        $form['items'][$key]['qty']['#disabled'] = TRUE;
+      }
+    }
+  }
+
+  $form['#validate'][] = 'uc_clearance_form_uc_cart_view_form_validate';
+}
+
+/**
+ * Additional validation for uc_cart_view_form. Don't allow going to checkout
+ * if any of the quantities are larger than available stock.
+ *
+ * @see uc_clearance_form_uc_cart_view_form_alter().
+ */
+function uc_clearance_form_uc_cart_view_form_validate($form, &$form_state) {
+  foreach ($form['items'] as $key => $item) {
+    if (!isset($item['nid'])) {
+      continue;
+    }
+    $node = $item['#entity'];
+    if (_uc_clearance_is_clearance($node)) {
+      $qty_requested = $form_state['values']['items'][$key]['qty'];
+      $stock_info = _uc_clearance_stock_info($node);
+      if (isset($stock_info['options'])) {
+        $sku = $node->model;
+        if (isset($stock_info['options'][$sku])) {
+          $qty_available = $stock_info['options'][$sku]['level'];
+          $safe_name = check_plain($node->title . ' (' . $stock_info['options'][$sku]['name'] . ')');
+        }
+        else {
+          $qty_available = 0;
+          $safe_name = check_plain($node->title);
+        }
+      }
+      else {
+        $qty_available = $stock_info['level'];
+        $safe_name = check_plain($node->title);
+      }
+      if ($qty_requested > 0 && $qty_available == 0) {
+        form_error($form['items'][$key]['qty'], t('There are no items left of %safe_name. Please remove it.', array('%safe_name' => $safe_name)));
+      }
+      elseif ($qty_requested > $qty_available) {
+        form_error($form['items'][$key]['qty'], t('There are only @num item(s) left of %safe_name. Please modify the quantity or remove it.', array('@num' => $qty_available, '%safe_name' => $safe_name)));
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for uc_catalog_buy_it_now_form().
+ *
+ * For clearance products that are out of stock, remove the "Add to cart"
+ * button.
  */
 function uc_clearance_form_uc_catalog_buy_it_now_form_alter(&$form, &$form_state, $form_id) {
   $node = node_load($form['nid']['#value']);
   if (_uc_clearance_is_clearance($node)) {
     $stock_info = _uc_clearance_stock_info($node);
-    if (isset($stock_info) && ($stock_info['total'] <= 0)) {
+    if ($stock_info['total_level'] <= 0) {
       $form['clearance'] = array(
         '#markup' => t('Sold out'),
         '#attributes' => array('class' => 'clearance'),
@@ -86,9 +198,6 @@ function uc_clearance_form_uc_catalog_buy_it_now_form_alter(&$form, &$form_state
 /**
  * Implements hook_form_FORM_ID_alter() for uc_cart_checkout_form().
  *
- * Add a validation handler to the cart checkout form to check for sold-out
- * clearance products.
- *
  * @see uc_clearance_cart_checkout_form_validate()
  */
 function uc_clearance_form_uc_cart_checkout_form_alter(&$form, &$form_state, $form_id) {
@@ -98,7 +207,8 @@ function uc_clearance_form_uc_cart_checkout_form_alter(&$form, &$form_state, $fo
 /**
  * Additional validation for uc_cart_checkout_form().
  *
- * Check for sold-out clearance products that managed to make it into the cart.
+ * Don't allow checking out if the order quantity for any clearance product is
+ * larger than the available stock.
  *
  * @see uc_clearance_form_uc_cart_checkout_form_alter()
  */
@@ -126,15 +236,104 @@ function uc_clearance_cart_checkout_form_validate($form, &$form_state) {
     }
   }
 
-  // if there were any errors, fail the validation
+  // if there were any errors, fail the validation.
   if (isset($errors)) {
-    $message = t('Sorry, you ordered more of a clearance product than the current availability:') . '<ul>' . "\n";
+    $message = t('Sorry, you ordered more of a product than the current availability:');
+    $message_errors = array();
     foreach ($errors as $error) {
-      $message .= '<li>' . t('For @descriptor you ordered !qty but there are only !stock_level available', $error) . '</li>' . "\n";
+      $message_errors[] = t('For @descriptor you ordered !qty but there are only !stock_level available.', $error);
     }
-    $message .= '</ul>. ' . t('Please click the "Cancel" button to go back to your cart and adjust the quantities in your order.');
+    $message .= theme('item_list', array('items' => $message_errors));
+    $message .= t('Please click the "Cancel" button to go back to your cart and adjust the quantities in your order.');
     form_set_error('cart', $message);
   }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for uc_cart_checkout_review_form().
+ *
+ * @see uc_clearance_form_uc_cart_checkout_review_form_validate().
+ */
+function uc_clearance_form_uc_cart_checkout_review_form_alter(&$form, &$form_state, $form_id) {
+  $form['#validate'][] = 'uc_clearance_form_uc_cart_checkout_review_form_validate';
+}
+
+/**
+ * Additional validation for uc_cart_checkout_review_form().
+ *
+ * Don't allow completion of the order if the order quantity for any clearance
+ * product is larger than the available stock. (This accounts for possible stock
+ * changes after the user goes to the review page.)
+ *
+ * @see
+ */
+function uc_clearance_form_uc_cart_checkout_review_form_validate($form, &$form_state) {
+  $order = $form_state['uc_order'];
+
+  // Check product stock levels on clearance items and reject order if stock
+  // would go negative
+  foreach ($order->products as $product) {
+    if (_uc_clearance_is_clearance($product)) {
+      $stock_level = uc_stock_level($product->model);
+      if ($product->qty > $stock_level) {
+        // order qty exceeds stock level; generate an error message entry.
+        $descriptor = $product->title;
+        $option_name = _uc_clearance_lookup_option_name($product->model);
+        if ($option_name) {
+          $descriptor .= ' (' . $option_name . ')';
+        }
+        $errors[] = array(
+          '@descriptor' => $descriptor,
+          '!qty' => $product->qty,
+          '!stock_level' => $stock_level,
+        );
+      }
+    }
+  }
+
+  // if there were any errors, fail the validation.
+  if (isset($errors)) {
+    $message = t('Sorry, there were stock changes since you reviewed your order. Now there are quantities in the order greater than the current availability:');
+    $message_errors = array();
+    foreach ($errors as $error) {
+      $message_errors[] = t('For @descriptor you ordered !qty but there are now only !stock_level available.', $error);
+    }
+    $message .= theme('item_list', array('items' => $message_errors));
+    $message .= t('Please <a href="!url">go back to your cart</a> and adjust the quantities in your order.', array('!url' => url('cart')));
+    form_set_error('', $message);
+  }
+}
+
+/**
+ * Implements hook_uc_store_status().
+ */
+function uc_clearance_uc_store_status() {
+  $message = array(
+    'title' => t('Clearance'),
+  );
+  if (config_get('uc_clearance.settings', 'method') == 'all') {
+    $message += array(
+      'status' => 'ok',
+      'desc' => t('All tracked products will be treated as clearance products.'),
+    );
+  }
+  else {
+    $tid = config_get('uc_clearance.settings', 'tid');
+    if ($tid) {
+      $term = taxonomy_term_load($tid);
+      $message += array(
+        'status' => 'ok',
+        'desc' => t('The clearance catalog term is %name.', array('%name' => $term->name)),
+      );
+    }
+    else {
+      $message += array(
+        'status' => 'warning',
+        'desc' => t('The Ubercart Clearance module is enabled but you have not selected a clearance catalog term. !link', array('!link' => l(t('Select the clearance catalog term.'), 'admin/store/settings/clearance'))),
+      );
+    }
+  }
+  return array($message);
 }
 
 /**
@@ -149,76 +348,101 @@ function uc_clearance_config_info() {
 }
 
 /**
- * Implements hook_uc_store_status().
- */
-function uc_clearance_uc_store_status() {
-  $message = array();
-  $clearance_tid = config_get('uc_clearance.settings', 'uc_clearance_tid');
-  if ($clearance_tid) {
-    $term = taxonomy_term_load($clearance_tid);
-    $message[] = array(
-      'status' => 'ok',
-      'title' => t('Clearance'),
-      'desc' => t('The clearance catalog term is %name.', array('%name' => $term->name)),
-    );
-  }
-  else {
-    $message[] = array(
-      'status' => 'warning',
-      'title' => t('Clearance'),
-      'desc' => t('The Ubercart Clearance module is enabled but you have not selected a clearance catalog term. !link', array('!link' => l(t('Select the clearance catalog term.'), 'admin/store/settings/clearance'))),
-    );
-  }
-
-  return $message;
-}
-
-/**
  * Returns all stock information for a given product (could be multiple SKUs).
  *
  * @param $node
- *  A fully loaded product node.
- * @return array
- *  An array containing string and numerical description of stock levels, text
- *  and numeric, or null if stock isn't being tracked.
+ *   A fully loaded product node.
+ * @param bool $remove_cart_items
+ *   If TRUE, reduce stock numbers by items that are currently in the cart.
+ * @return array | NULL
+ *   An array containing string and numerical description of stock levels, text
+ *   and numeric, or null if stock isn't being tracked. Elements are:
+ *   - level: the stock level if the product itself is tracked (no options).
+ *   - options: present only if there are multiple options for the product.
+ *       Contains stock quantities keyed by SKU:
+ *     - name: the name of the option.
+ *     - level: the stock level of the option.
+ *   - total: the total number of the product available across all options.
+ *   - avail: a text string stating the available stock (lists numbers for all
+ *       available options if the product has options).
  */
-function _uc_clearance_stock_info($node) {
-  $stock_info = NULL;
-  $skus = array();
-  $adjustments = db_query('
+function _uc_clearance_stock_info($node, $remove_cart_items = FALSE) {
+  $stock_info = array();
+  $skus = db_query('
     SELECT model
     FROM {uc_product_adjustments}
-    WHERE nid = :nid', array(':nid' => $node->nid));
-  foreach ($adjustments as $adjustment) {
-    if (!in_array($adjustment->model, $skus)) {
-      $skus[] = $adjustment->model;
+    WHERE nid = :nid
+    ', array(':nid' => $node->nid))
+    ->fetchCol();;
+  if (empty($skus)) {
+    // No options, see if the product is tracked.
+    $level = uc_stock_level($node->model);
+    if (is_numeric($level)) {
+      $stock_info['level'] = (integer) $level;
+      $stock_info['total_level'] = (integer) $level;
     }
   }
-  if (!empty($skus)) {
-    // if there are multiple SKUs, then list stock availability of all options.
-    $avail = array();
-    $cum_stock_level = 0;
+  else {
+    // if there are multiple SKUs, then list stock availability of all options
+    // that are tracked as well as the total for the product.
+    $total_level = 0;
     foreach ($skus as $sku) {
-      $stock_level = uc_stock_level($sku);
-      if (is_numeric($stock_level)) {
-        $name = _uc_clearance_lookup_option_name($sku);
-        $avail[] =  " " . $name . " (" . $stock_level . ")";
-        if ($stock_level > 0) {
-          $cum_stock_level += $stock_level; // don't accumulate negative stock
+      $name = _uc_clearance_lookup_option_name($sku);
+      $level = uc_stock_level($sku);
+      if (is_numeric($level)) {
+        if ($level > 0) {
+          $total_level += $level; // don't accumulate negative stock
+        }
+        $stock_info['options'][$sku] = array(
+          'name' => $name,
+          'level' => $level,
+        );
+      }
+    }
+    $stock_info['total_level'] = (integer) $total_level;
+  }
+  if (empty($stock_info['level']) && empty($stock_info['options'])) {
+    // The product isn't tracked and it has no tracked options.
+    return NULL;
+  }
+
+  // If requested, remove items currently in the cart from the stock numbers.
+  if ($remove_cart_items) {
+    $cart = uc_cart_get_contents();
+    foreach ($cart as $cart_item) {
+      if ($cart_item->nid == $node->nid) {
+        $model = $cart_item->model;
+        $qty = $cart_item->qty;
+        if ($node->model == $model) {
+          $stock_info['level'] -= $qty;
+          $stock_info['total_level'] -= $qty;
+        }
+        else {
+          foreach ($stock_info['options'] as $sku => $info) {
+            if ($sku == $model) {
+              $stock_info['options'][$sku]['level'] -= $qty;
+              $stock_info['total_level'] -= $qty;
+            }
+          }
         }
       }
     }
-    $stock_info['avail'] = implode(",", $avail);
-    $stock_info['total'] = (integer) $cum_stock_level;
   }
-  else { // no options on this product
-    $stockactive = uc_stock_level($node->model);
-    if (is_numeric($stockactive)) { //stock active
-      $stock_info['avail'] = (string) $stockactive;
-      $stock_info['total'] = (integer) $stockactive;
+
+  // Build the quantity available string.
+  if (empty($stock_info['options'])) {
+    $stock_info['avail'] = (string) $stock_info['level'];
+  }
+  else {
+    $avail = array();
+    foreach ($stock_info['options'] as $sku => $info) {
+      if ($info['level'] > 0) {
+        $avail[] = $info['name'] . " (" . $info['level'] . ")";
+      }
     }
+    $stock_info['avail'] = implode(', ', $avail);
   }
-  // note, if stock tracking wasn't active, return will be null (not even an array)
+
   return $stock_info;
 }
 
@@ -231,26 +455,38 @@ function _uc_clearance_stock_info($node) {
  *  TRUE if clearance, FALSE otherwise
  **/
 function _uc_clearance_is_clearance($node) {
-  $clearance_tid = config_get('uc_clearance.settings', 'uc_clearance_tid');
-  if ($clearance_tid && isset($node->taxonomy_catalog['und'])) {
-    foreach ($node->taxonomy_catalog['und'] as $elem) {
-      if ($elem['tid'] == $clearance_tid) {
-        return TRUE;
+  if (config_get('uc_clearance.settings', 'method') == 'all') {
+    // TRUE only if the product is tracked in stock tables
+    return (bool) db_query('
+      SELECT COUNT(1)
+      FROM {uc_product_stock}
+      WHERE nid = :nid
+      ', array(':nid' => $node->nid))
+      ->fetchField();
+  }
+  else {
+    // TRUE if the product has the clearance catalog term
+    $tid = config_get('uc_clearance.settings', 'tid');
+    if ($tid && isset($node->taxonomy_catalog['und'])) {
+      foreach ($node->taxonomy_catalog['und'] as $elem) {
+        if ($elem['tid'] == $tid) {
+          return TRUE;
+        }
       }
     }
+    return FALSE;
   }
-  return FALSE;
 }
 
 /**
  * Checks if a product is clearance with zero stock and if so, unpublish it.
  */
-function _uc_clearance_check_clearance($product) {
+function _uc_clearance_check_to_unpublish($product) {
   $node = node_load($product->nid);
   if (_uc_clearance_is_clearance($node)) {
     $stock_info = _uc_clearance_stock_info($node);
-    if ($stock_info['total'] === 0) {
-      // total is 0 but not null, so unpublish the product Now, the following
+    if ($stock_info['total_level'] === 0) {
+      // total is 0 but not null, so unpublish the product. Now, the following
       // two lines are the Backdrop-friendly way of doing this, but there's a
       // bad side effect. Unpublishing a product that is part of a product kit
       // causes the product kit pricing to recalculate, and if there is a
@@ -264,6 +500,9 @@ function _uc_clearance_check_clearance($product) {
       // flag directly, thereby bypassing all of the Backdrop hook_update()
       // calls that might have gotten triggered. Which is not very nice,
       // Backdrop-wise, but at least it doesn't screw up the product pricing.
+      //
+      // Once https://github.com/backdrop-contrib/uc_price_per_role/issues/9
+      // has been fixed, we can go back to the normal way of unpublishing.
       db_update('node')
         ->fields(array(
         'status' => 0,
@@ -284,14 +523,14 @@ function _uc_clearance_check_clearance($product) {
 }
 
 /**
- * Returns the option id, if any, of an option from its SKU
+ * Returns the option id, if any, of an option from its SKU.
  */
 function _uc_clearance_lookup_option_id($sku) {
   $combination = db_query('
     SELECT combination
     FROM {uc_product_adjustments}
-    WHERE model = :sku
-    ', array(':sku' => $sku))
+    WHERE model = :model
+    ', array(':model' => $sku))
     ->fetchField();
   if ($combination) {
     $combination = unserialize($combination);
@@ -302,7 +541,7 @@ function _uc_clearance_lookup_option_id($sku) {
 }
 
 /**
- * Returns the name of an option, if any, from its SKU
+ * Returns the name of an option, if any, from its SKU.
  */
 function _uc_clearance_lookup_option_name($sku) {
   $oid = _uc_clearance_lookup_option_id($sku);

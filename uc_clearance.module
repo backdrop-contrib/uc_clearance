@@ -37,6 +37,10 @@ function uc_clearance_form_uc_product_add_to_cart_form_alter(&$form, &$form_stat
   }
   // Get stock info, reduced by any products that are already in the cart.
   $stock_info = _uc_clearance_stock_info($node, TRUE);
+  if (empty($stock_info)) {
+    // Maybe marked as clearance, but there's no stock information for it.
+    return;
+  }
   if ($stock_info['total_level'] <= 0) {
     // Product is sold out, but still visible.
     $sold_out_text = config_get('uc_clearance.settings', 'sold_out_text');
@@ -148,26 +152,42 @@ function uc_clearance_form_uc_cart_view_form_validate($form, &$form_state) {
     if (_uc_clearance_is_clearance($node)) {
       $qty_requested = $form_state['values']['items'][$key]['qty'];
       $stock_info = _uc_clearance_stock_info($node);
-      if (isset($stock_info['options'])) {
-        $sku = $node->model;
-        if (isset($stock_info['options'][$sku])) {
-          $qty_available = $stock_info['options'][$sku]['level'];
-          $safe_name = check_plain($node->title . ' (' . $stock_info['options'][$sku]['name'] . ')');
+      if (empty($stock_info)) {
+        // There is no stock info at all; assume the product is totally sold out
+        // and was removed from the stock system.
+        $qty_available = 0;
+        $safe_name = check_plain($node->title);
+      }
+      else {
+        // There is stock info. See if it has options.
+        if (isset($stock_info['options'])) {
+          $sku = $node->model;
+          if (isset($stock_info['options'][$sku])) {
+            $qty_available = $stock_info['options'][$sku]['level'];
+            $safe_name = check_plain($node->title . ' (' . $stock_info['options'][$sku]['name'] . ')');
+          }
+          else {
+            // If there's no stock info, it's fully sold out (and unfortunately,
+            // we no longer have the option name, so we'll just use the SKU).
+            $qty_available = 0;
+            $safe_name = check_plain($node->title . ' (' . $sku . ')');
+          }
         }
         else {
-          $qty_available = 0;
+          // There is stock info, but no options.
+          $qty_available = $stock_info['level'];
           $safe_name = check_plain($node->title);
         }
       }
-      else {
-        $qty_available = $stock_info['level'];
-        $safe_name = check_plain($node->title);
-      }
-      if ($qty_requested > 0 && $qty_available == 0) {
-        form_error($form['items'][$key]['qty'], t('There are no items left of %safe_name. Please remove it.', array('%safe_name' => $safe_name)));
-      }
-      elseif ($qty_requested > $qty_available) {
-        form_error($form['items'][$key]['qty'], t('There are only @num item(s) left of %safe_name. Please modify the quantity or remove it.', array('@num' => $qty_available, '%safe_name' => $safe_name)));
+
+      // Check stock availability except when we're removing a product.
+      if (substr($form_state['clicked_button']['#name'], 0, 7) != 'remove-') {
+        if ($qty_requested > 0 && $qty_available == 0) {
+          form_error($form['items'][$key]['qty'], t('There are no items left of %safe_name. Please remove it.', array('%safe_name' => $safe_name)));
+        }
+        elseif ($qty_requested > $qty_available) {
+          form_error($form['items'][$key]['qty'], t('There are only @num item(s) left of %safe_name. Please modify the quantity or remove it.', array('@num' => $qty_available, '%safe_name' => $safe_name)));
+        }
       }
     }
   }

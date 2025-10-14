@@ -1,16 +1,10 @@
 name = Ubercart Clearance
 description = Adds special handling for products marked "Clearance".
-dependencies[] = rules
 dependencies[] = ubercart
 dependencies[] = uc_stock
 package = Ubercart - extra
 backdrop = 1.x
 type = module
+maintainers[bugfolder] = Robert J. Lang
 
 configure = admin/store/settings/clearance
-
-
-; Added by Backdrop CMS packaging script on 2022-08-28
-project = uc_clearance
-version = 1.x-1.0.0
-timestamp = 1661712221

@@ -39,6 +39,7 @@ function uc_clearance_form_uc_product_add_to_cart_form_alter(&$form, &$form_stat
   $stock_info = _uc_clearance_stock_info($node, TRUE);
   if (empty($stock_info)) {
     // Maybe marked as clearance, but there's no stock information for it.
+    watchdog('Product %title is marked as clearance but has no stock information.', array('%title' => $node->title), 'warning');
     return;
   }
   if ($stock_info['total_level'] <= 0) {
@@ -203,7 +204,7 @@ function uc_clearance_form_uc_catalog_buy_it_now_form_alter(&$form, &$form_state
   $node = node_load($form['nid']['#value']);
   if (_uc_clearance_is_clearance($node)) {
     $stock_info = _uc_clearance_stock_info($node);
-    if ($stock_info['total_level'] <= 0) {
+    if (empty($stock_info) || $stock_info['total_level'] <= 0) {
       $form['clearance'] = array(
         '#markup' => t('Sold out'),
         '#attributes' => array('class' => 'clearance'),
@@ -421,7 +422,7 @@ function _uc_clearance_stock_info($node, $remove_cart_items = FALSE) {
     }
     $stock_info['total_level'] = (integer) $total_level;
   }
-  if (empty($stock_info['level']) && empty($stock_info['options'])) {
+  if (!isset($stock_info['level']) && !isset($stock_info['options'])) {
     // The product isn't tracked and it has no tracked options.
     return NULL;
   }

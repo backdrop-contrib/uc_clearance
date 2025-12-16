@@ -39,7 +39,7 @@ function uc_clearance_form_uc_product_add_to_cart_form_alter(&$form, &$form_stat
   $stock_info = _uc_clearance_stock_info($node, TRUE);
   if (empty($stock_info)) {
     // Maybe marked as clearance, but there's no stock information for it.
-    watchdog('Product %title is marked as clearance but has no stock information.', array('%title' => $node->title), 'warning');
+    watchdog('uc_clearance', 'Product %title is marked as clearance but has no stock information.', array('%title' => $node->title), 'warning');
     return;
   }
   if ($stock_info['total_level'] <= 0) {
